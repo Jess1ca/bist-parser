@@ -55,17 +55,17 @@ def isProj(sentence):
 
     return len(forest.roots) == 1
 
-def vocab(conll_path):
+def vocab(conll_paths):
     wordsCount = Counter()
     posCount = Counter()
     relCount = Counter()
 
-    with open(conll_path, 'r') as conllFP:
-        for sentence in read_conll(conllFP, True):
-            wordsCount.update([node.norm for node in sentence])
-            posCount.update([node.pos for node in sentence])
-            relCount.update([node.relation for node in sentence])
-
+    for conll_path in conll_paths.split(','):
+        with open(conll_path, 'r') as conllFP:
+            for sentence in read_conll(conllFP, True):
+                wordsCount.update([node.norm for node in sentence])
+                posCount.update([node.pos for node in sentence])
+                relCount.update([node.relation for node in sentence])
     return (wordsCount, {w: i for i, w in enumerate(wordsCount.keys())},  posCount.keys(), relCount.keys())
 
 def read_conll(fh, proj):
@@ -86,7 +86,7 @@ def read_conll(fh, proj):
             tokens = [root]
             id = 0
         else:
-            tokens.append(ConllEntry(int(tok[0]), tok[1], tok[4], tok[3], int(tok[6]) if tok[6] != '_' else -1, tok[7]))
+	    tokens.append(ConllEntry(int(tok[0]), tok[1], tok[4].replace('(','-LRB-').replace(')','-RRB-'), tok[3], int(tok[6]) if tok[6] != '_' else -1, tok[7]))
     if len(tokens) > 1:
         yield tokens
 
@@ -112,3 +112,4 @@ cposTable = {"PRP$": "PRON", "VBG": "VERB", "VBD": "VERB", "VBN": "VERB", ",": "
              ":": ".", "NNS": "NOUN", "NNP": "NOUN", "``": ".", "WRB": "ADV", "CC": "CONJ", "LS": "X", "PDT": "DET", "RBS": "ADV", "RBR": "ADV", "CD": "NUM", "EX": "DET", 
              "IN": "ADP", "WP$": "PRON", "MD": "VERB", "NNPS": "NOUN", "JJS": "ADJ", "JJR": "ADJ", "SYM": "X", "VB": "VERB", "UH": "X", "ROOT-POS": "ROOT-CPOS", 
              "-LRB-": ".", "-RRB-": "."}
+

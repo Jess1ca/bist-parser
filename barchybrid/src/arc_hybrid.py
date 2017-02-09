@@ -4,7 +4,12 @@ from operator import itemgetter
 from itertools import chain
 import utils, time, random
 import numpy as np
-
+from collections import defaultdict
+from scipy.spatial import distance
+from nltk.stem.wordnet import WordNetLemmatizer
+import os
+from nltk.corpus import wordnet as wn
+from spacy.en import English
 
 class ArcHybridLSTM:
     def __init__(self, words, pos, rels, w2i, options):
@@ -20,6 +25,17 @@ class ArcHybridLSTM:
         self.wdims = options.wembedding_dims
         self.pdims = options.pembedding_dims
         self.rdims = options.rembedding_dims
+
+        self.POSFlag = options.POSFlag
+        self.wnFlag = False#options.wnFlag
+        self.BrownFlag = options.BrownFlag
+        self.CAPFlag = options.CAPFlag
+        self.SUFFlag = options.SUFFlag
+        self.LEMFlag = options.LEMFlag
+        self.symFlag = options.symFlag
+        self.sentimentFlag = options.sentimentFlag
+        self.spacy = 0#options.spacyFlag
+
         self.layers = options.lstm_layers
         self.wordsCount = words
         self.vocab = {word: ind+3 for word, ind in w2i.iteritems()}
@@ -102,8 +118,99 @@ class ArcHybridLSTM:
         self.model.add_parameters("routput-layer", (2 * (len(self.irels) + 0) + 1, self.hidden2_units if self.hidden2_units > 0 else self.hidden_units))
         self.model.add_parameters("routput-bias", (2 * (len(self.irels) + 0) + 1))
 
+        self.conj = self.POSFlag or self.BrownFlag or self.CAPFlag or self.SUFFlag or self.LEMFlag or self.symFlag or self.sentimentFlag
+        if self.conj:
+            x_len = sum([1 if self.wnFlag else 0, 2 if self.sentimentFlag else 0, 1 if self.BrownFlag else 0, 1 if self.LEMFlag else 0, 1 if self.SUFFlag else 0, 1 if self.CAPFlag else 0, 1 if self.POSFlag else 0, 1 if self.symFlag else 0])
+            self.model.add_parameters("conj-hidden-layer", (100, x_len + (self.ldims * self.nnvecs * (self.k + 1))))
+            self.model.add_parameters("conj-hidden-bias", (100))
+            self.model.add_parameters("conj-output-layer", (1, 100))
+            if self.BrownFlag:
+                self.brown = {line.split()[1]:line.split()[0] for line in open("brown-english-wikitext.case-intact.txt-c1000-freq10-v3.txt")}
+        
+            if self.sentimentFlag:
+                self.pos_sentiment = [line.strip() for line in open("positive_words.txt")]
+                self.neg_sentiment = [line.strip() for line in open("negative_words.txt")]
 
-    def __evaluate(self, stack, buf, train):
+            if self.spacy:
+                self.spacy = English()
+
+    def __getSentiment(self,word):
+        if word.lower() in self.pos_sentiment:
+            return 1
+        elif word.lower() in self.neg_sentiment:
+            return -1
+        else:
+            return 0
+
+    def cosine_distance(self,v1, v2):
+        u = dot_product(v1, v2)
+        n1 = np.array(v1.value())
+        n2 = np.array(v1.value())
+        d = distance.euclidean(n1 + n1, n1) * distance.euclidean(n2 + n2, n2)
+        ret = u.value() / float(d)
+        return ret
+
+    def wordnet_distance(self, w1, w2):
+        best_score = 0
+        w1 = wn.synsets(w1)
+        w2 = wn.synsets(w2)
+        for syn1 in w1:
+            for syn2 in w2:
+                score = syn1.wup_similarity(syn2)
+                if score > best_score:
+                    best_score = score
+        return best_score
+
+
+    def __conj_score(self,sentence,stack,inp):
+
+        if len(stack.roots) < 2:
+            return scalarInput(0)
+
+        head = stack.roots[-2]
+        mod = stack.roots[-1]
+        x = [inp]
+
+        if self.POSFlag:
+            x.append(scalarInput(1) if head.pos == mod.norm else scalarInput(0))
+        if self.CAPFlag:
+            x.append(scalarInput(1) if head.form[0].isupper() and mod.form[0].isupper() else scalarInput(0))
+        if self.SUFFlag:
+            x.append(scalarInput(len(os.path.commonprefix([head.norm[::-1], mod.norm[::-1]]))))
+        if self.sentimentFlag:
+            x.append(scalarInput(self.__getSentiment(head.norm)))
+            x.append(scalarInput(self.__getSentiment(mod.norm)))
+        if self.BrownFlag:
+            head_brown = self.brown[head.norm] if head.norm in self.brown else None
+            mod_brown = self.brown[mod.norm] if mod.norm in self.brown else None
+            if head_brown and mod_brown:
+                x.append(scalarInput(len(os.path.commonprefix([head_brown, mod_brown]))))
+            else:
+                x.append(scalarInput(-1))
+        if self.LEMFlag:
+            if self.spacy:
+                w_l1 = self.spacy(unicode(head.norm))[0].lemma_
+                w_l2 = self.spacy(unicode(mod.norm))[0].lemma_
+                x.append(scalarInput(1) if w_l1 == w_l2 else scalarInput(0))
+            else:
+                lmtzr = WordNetLemmatizer()
+                x.append(scalarInput(1) if lmtzr.lemmatize(head.norm) == lmtzr.lemmatize(mod.norm) else scalarInput(0))
+        if self.symFlag:
+            x.append(scalarInput(self.cosine_distance(head.evec,mod.evec)))
+        if self.wnFlag:
+            x.append(scalarInput(self.wordnet_distance(head.norm, mod.norm)))
+
+        x = concatenate(x)
+        W = parameter(self.model["conj-hidden-layer"])
+        b = parameter(self.model["conj-hidden-bias"])
+        V = parameter(self.model["conj-output-layer"])
+
+        return V * rectify(W * x + b)
+
+
+
+
+    def __evaluate(self, stack, buf, sentence, train):
         topStack = [ stack.roots[-i-1].lstms if len(stack) > i else [self.empty] for i in xrange(self.k) ]
         topBuffer = [ buf.roots[i].lstms if len(buf) > i else [self.empty] for i in xrange(1) ]
 
@@ -119,6 +226,15 @@ class ArcHybridLSTM:
         else:
             output = (self.outLayer * self.activation(self.hidLayer * input + self.hidBias) + self.outBias)
 
+
+        if self.conj:
+            conj_ind = self.irels.index("conj")
+            score = self.__conj_score(sentence,stack,input)
+            if score.value() != 0:
+                l = [pick(routput, j) for j in range(conj_ind * 2 + 2) ]
+                l+= [pick(routput, conj_ind * 2 + 2) + score]
+                l+= [pick(routput, j) for j in range(conj_ind * 2 + 2 + 1, 2*len(self.irels)+1) ]
+                routput = concatenate(l)
         scrs, uscrs = routput.value(), output.value()
 
         uscrs0 = uscrs[0]
@@ -249,7 +365,7 @@ class ArcHybridLSTM:
                 hoffset = 1 if self.headFlag else 0
 
                 while len(buf) > 0 or len(stack) > 1 :
-                    scores = self.__evaluate(stack, buf, False)
+                    scores = self.__evaluate(stack, buf, sentence, False)
                     best = max(chain(*scores), key = itemgetter(2) )
 
                     if best[1] == 2:
@@ -331,7 +447,7 @@ class ArcHybridLSTM:
                 hoffset = 1 if self.headFlag else 0
 
                 while len(buf) > 0 or len(stack) > 1 :
-                    scores = self.__evaluate(stack, buf, True)
+                    scores = self.__evaluate(stack, buf, sentence, True)
                     scores.append([(None, 3, ninf ,None)])
 
                     alpha = stack.roots[:-2] if len(stack) > 2 else []
